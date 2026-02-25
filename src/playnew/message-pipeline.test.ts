@@ -18,6 +18,8 @@ import {
   type PipelineDeps,
 } from './message-pipeline.js';
 
+import { grantConsent } from './consent-manager.js';
+
 import type { NewMessage } from '../types.js';
 import type { UserInstance } from './types.js';
 import type { AssembledContext } from './context-engine.js';
@@ -62,6 +64,11 @@ function setupTestData() {
     org_id: org.org_id,
     instance_id: instance.instance_id,
   });
+
+  // Grant data_processing consent (required for message pipeline)
+  grantConsent(instance.instance_id, org.org_id, 'data_processing');
+  // Grant pattern_collection consent (required for pattern logging)
+  grantConsent(instance.instance_id, org.org_id, 'pattern_collection');
 
   return { org, team, instance };
 }

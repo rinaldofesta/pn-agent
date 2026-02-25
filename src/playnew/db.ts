@@ -234,6 +234,108 @@ function createPlayNewSchema(database: Database.Database): void {
     WHERE pl.pattern_type = 'skill_usage'
     GROUP BY pl.org_id, pl.team_id, pl.category_l2, pl.period
     HAVING COUNT(DISTINCT pl.user_id_hash) >= 5;
+
+    -- Per-user memory entries
+    CREATE TABLE IF NOT EXISTS user_memories (
+      memory_id TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL REFERENCES user_instances(instance_id),
+      memory_type TEXT NOT NULL CHECK(memory_type IN ('fact', 'preference', 'pattern', 'relationship', 'decision', 'context')),
+      content TEXT NOT NULL,
+      content_embedding BLOB,
+      source_channel TEXT,
+      source_message_id TEXT,
+      confidence REAL DEFAULT 1.0,
+      access_count INTEGER DEFAULT 0,
+      last_accessed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT,
+      is_deleted INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_memories_instance ON user_memories(instance_id);
+    CREATE INDEX IF NOT EXISTS idx_user_memories_type ON user_memories(instance_id, memory_type);
+    CREATE INDEX IF NOT EXISTS idx_user_memories_updated ON user_memories(updated_at);
+
+    -- Conversation sessions
+    CREATE TABLE IF NOT EXISTS pn_sessions (
+      session_id TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL REFERENCES user_instances(instance_id),
+      channel_type TEXT NOT NULL,
+      channel_id TEXT,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_activity_at TEXT NOT NULL DEFAULT (datetime('now')),
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'idle', 'closed', 'expired')),
+      topic TEXT,
+      summary TEXT,
+      message_count INTEGER DEFAULT 0,
+      token_count INTEGER DEFAULT 0,
+      metadata TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pn_sessions_instance ON pn_sessions(instance_id);
+    CREATE INDEX IF NOT EXISTS idx_pn_sessions_activity ON pn_sessions(last_activity_at);
+    CREATE INDEX IF NOT EXISTS idx_pn_sessions_status ON pn_sessions(instance_id, status);
+
+    -- Session messages
+    CREATE TABLE IF NOT EXISTS session_messages (
+      message_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES pn_sessions(session_id),
+      role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+      content TEXT NOT NULL,
+      channel_type TEXT,
+      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      token_estimate INTEGER DEFAULT 0,
+      is_compacted INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
+    CREATE INDEX IF NOT EXISTS idx_session_messages_time ON session_messages(timestamp);
+
+    -- GDPR data subject requests
+    CREATE TABLE IF NOT EXISTS gdpr_requests (
+      request_id TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL REFERENCES user_instances(instance_id),
+      org_id TEXT NOT NULL REFERENCES organizations(org_id),
+      request_type TEXT NOT NULL CHECK(request_type IN ('export', 'delete', 'rectify', 'restrict', 'portability', 'object')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')),
+      requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+      requested_by TEXT NOT NULL,
+      processed_at TEXT,
+      completed_at TEXT,
+      processor_notes TEXT,
+      data_scope TEXT DEFAULT 'all',
+      export_path TEXT,
+      error_message TEXT,
+      metadata TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_gdpr_requests_instance ON gdpr_requests(instance_id);
+    CREATE INDEX IF NOT EXISTS idx_gdpr_requests_org ON gdpr_requests(org_id);
+    CREATE INDEX IF NOT EXISTS idx_gdpr_requests_status ON gdpr_requests(status);
+
+    -- Data retention policies per org
+    CREATE TABLE IF NOT EXISTS retention_policies (
+      policy_id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES organizations(org_id),
+      data_category TEXT NOT NULL CHECK(data_category IN ('personal_memory', 'session_history', 'pattern_logs', 'audit_logs', 'channel_bindings')),
+      retention_days INTEGER NOT NULL,
+      auto_delete INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(org_id, data_category)
+    );
+
+    -- Consent records
+    CREATE TABLE IF NOT EXISTS consent_records (
+      consent_id TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL REFERENCES user_instances(instance_id),
+      consent_type TEXT NOT NULL CHECK(consent_type IN ('data_processing', 'memory_storage', 'pattern_collection', 'cross_org_benchmarking', 'email_processing')),
+      granted INTEGER NOT NULL DEFAULT 0,
+      granted_at TEXT,
+      withdrawn_at TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      version TEXT NOT NULL DEFAULT '1.0',
+      UNIQUE(instance_id, consent_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_consent_instance ON consent_records(instance_id);
   `);
 }
 
@@ -428,6 +530,49 @@ export interface ChannelBindingRow {
   created_at: string;
 }
 
+export interface UserMemoryRow {
+  memory_id: string;
+  instance_id: string;
+  memory_type: string;
+  content: string;
+  content_embedding: Buffer | null;
+  source_channel: string | null;
+  source_message_id: string | null;
+  confidence: number;
+  access_count: number;
+  last_accessed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+  is_deleted: number;
+}
+
+export interface PnSessionRow {
+  session_id: string;
+  instance_id: string;
+  channel_type: string;
+  channel_id: string | null;
+  started_at: string;
+  last_activity_at: string;
+  status: string;
+  topic: string | null;
+  summary: string | null;
+  message_count: number;
+  token_count: number;
+  metadata: string | null;
+}
+
+export interface SessionMessageRow {
+  message_id: string;
+  session_id: string;
+  role: string;
+  content: string;
+  channel_type: string | null;
+  timestamp: string;
+  token_estimate: number;
+  is_compacted: number;
+}
+
 export interface AggregatedPatternRow {
   org_id: string;
   team_id?: string;
@@ -448,6 +593,45 @@ export interface SkillUsageRow {
   period: string;
   activation_count: number;
   user_count: number;
+}
+
+export interface GdprRequestRow {
+  request_id: string;
+  instance_id: string;
+  org_id: string;
+  request_type: string;
+  status: string;
+  requested_at: string;
+  requested_by: string;
+  processed_at: string | null;
+  completed_at: string | null;
+  processor_notes: string | null;
+  data_scope: string;
+  export_path: string | null;
+  error_message: string | null;
+  metadata: string | null;
+}
+
+export interface RetentionPolicyRow {
+  policy_id: string;
+  org_id: string;
+  data_category: string;
+  retention_days: number;
+  auto_delete: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConsentRecordRow {
+  consent_id: string;
+  instance_id: string;
+  consent_type: string;
+  granted: number;
+  granted_at: string | null;
+  withdrawn_at: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  version: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,4 +1243,856 @@ export function getTaxonomyByCode(code: string): TaxonomyRow | undefined {
   return db
     .prepare('SELECT * FROM work_category_taxonomy WHERE code = ?')
     .get(code) as TaxonomyRow | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// User Memories
+// ---------------------------------------------------------------------------
+
+export function insertMemory(params: {
+  instance_id: string;
+  memory_type: string;
+  content: string;
+  source_channel?: string | null;
+  source_message_id?: string | null;
+  confidence?: number;
+  expires_at?: string | null;
+}): UserMemoryRow {
+  const memory_id = randomUUID();
+  db.prepare(
+    `INSERT INTO user_memories
+       (memory_id, instance_id, memory_type, content, source_channel,
+        source_message_id, confidence, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    memory_id,
+    params.instance_id,
+    params.memory_type,
+    params.content,
+    params.source_channel ?? null,
+    params.source_message_id ?? null,
+    params.confidence ?? 1.0,
+    params.expires_at ?? null,
+  );
+  return getMemory(memory_id)!;
+}
+
+export function getMemory(memoryId: string): UserMemoryRow | undefined {
+  return db
+    .prepare('SELECT * FROM user_memories WHERE memory_id = ?')
+    .get(memoryId) as UserMemoryRow | undefined;
+}
+
+export function getMemoriesByInstance(
+  instanceId: string,
+  opts?: { type?: string; limit?: number; includeDeleted?: boolean },
+): UserMemoryRow[] {
+  const conditions = ['instance_id = ?'];
+  const values: unknown[] = [instanceId];
+
+  if (!opts?.includeDeleted) {
+    conditions.push('is_deleted = 0');
+  }
+  if (opts?.type) {
+    conditions.push('memory_type = ?');
+    values.push(opts.type);
+  }
+
+  const where = conditions.join(' AND ');
+  const limit = opts?.limit ? `LIMIT ${opts.limit}` : '';
+
+  return db
+    .prepare(
+      `SELECT * FROM user_memories WHERE ${where} ORDER BY updated_at DESC ${limit}`,
+    )
+    .all(...values) as UserMemoryRow[];
+}
+
+export function searchMemories(
+  instanceId: string,
+  keywords: string[],
+  opts?: { limit?: number },
+): UserMemoryRow[] {
+  if (keywords.length === 0) return [];
+
+  const conditions = keywords.map(() => 'content LIKE ?');
+  const values: unknown[] = [instanceId, ...keywords.map((k) => `%${k}%`)];
+
+  const limit = opts?.limit ?? 10;
+
+  return db
+    .prepare(
+      `SELECT * FROM user_memories
+       WHERE instance_id = ? AND is_deleted = 0
+         AND (${conditions.join(' OR ')})
+       ORDER BY updated_at DESC
+       LIMIT ?`,
+    )
+    .all(...values, limit) as UserMemoryRow[];
+}
+
+export function updateMemoryRow(
+  memoryId: string,
+  updates: Partial<Pick<UserMemoryRow, 'content' | 'confidence' | 'expires_at' | 'memory_type'>>,
+): void {
+  const fields: string[] = ["updated_at = datetime('now')"];
+  const values: unknown[] = [];
+
+  if (updates.content !== undefined) {
+    fields.push('content = ?');
+    values.push(updates.content);
+  }
+  if (updates.confidence !== undefined) {
+    fields.push('confidence = ?');
+    values.push(updates.confidence);
+  }
+  if (updates.expires_at !== undefined) {
+    fields.push('expires_at = ?');
+    values.push(updates.expires_at);
+  }
+  if (updates.memory_type !== undefined) {
+    fields.push('memory_type = ?');
+    values.push(updates.memory_type);
+  }
+
+  values.push(memoryId);
+  db.prepare(`UPDATE user_memories SET ${fields.join(', ')} WHERE memory_id = ?`).run(
+    ...values,
+  );
+}
+
+export function incrementMemoryAccess(memoryId: string): void {
+  db.prepare(
+    `UPDATE user_memories
+     SET access_count = access_count + 1, last_accessed_at = datetime('now')
+     WHERE memory_id = ?`,
+  ).run(memoryId);
+}
+
+export function softDeleteMemory(memoryId: string): void {
+  db.prepare(
+    `UPDATE user_memories SET is_deleted = 1, updated_at = datetime('now') WHERE memory_id = ?`,
+  ).run(memoryId);
+}
+
+export function softDeleteAllMemories(instanceId: string): void {
+  db.prepare(
+    `UPDATE user_memories SET is_deleted = 1, updated_at = datetime('now') WHERE instance_id = ?`,
+  ).run(instanceId);
+}
+
+export function deleteExpiredMemories(): number {
+  const result = db.prepare(
+    `DELETE FROM user_memories WHERE expires_at IS NOT NULL AND expires_at < datetime('now')`,
+  ).run();
+  return result.changes;
+}
+
+export function getMemoryStats(instanceId: string): {
+  total: number;
+  by_type: Record<string, number>;
+  oldest: string | null;
+  newest: string | null;
+} {
+  const counts = db
+    .prepare(
+      `SELECT memory_type, COUNT(*) as cnt
+       FROM user_memories
+       WHERE instance_id = ? AND is_deleted = 0
+       GROUP BY memory_type`,
+    )
+    .all(instanceId) as Array<{ memory_type: string; cnt: number }>;
+
+  const by_type: Record<string, number> = {};
+  let total = 0;
+  for (const row of counts) {
+    by_type[row.memory_type] = row.cnt;
+    total += row.cnt;
+  }
+
+  const oldest = db
+    .prepare(
+      `SELECT MIN(created_at) as val FROM user_memories WHERE instance_id = ? AND is_deleted = 0`,
+    )
+    .get(instanceId) as { val: string | null };
+
+  const newest = db
+    .prepare(
+      `SELECT MAX(created_at) as val FROM user_memories WHERE instance_id = ? AND is_deleted = 0`,
+    )
+    .get(instanceId) as { val: string | null };
+
+  return {
+    total,
+    by_type,
+    oldest: oldest.val,
+    newest: newest.val,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Play New Sessions
+// ---------------------------------------------------------------------------
+
+export function insertPnSession(params: {
+  instance_id: string;
+  channel_type: string;
+  channel_id?: string | null;
+  metadata?: string | null;
+}): PnSessionRow {
+  const session_id = randomUUID();
+  db.prepare(
+    `INSERT INTO pn_sessions (session_id, instance_id, channel_type, channel_id, metadata)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    session_id,
+    params.instance_id,
+    params.channel_type,
+    params.channel_id ?? null,
+    params.metadata ?? null,
+  );
+  return getPnSession(session_id)!;
+}
+
+export function getPnSession(sessionId: string): PnSessionRow | undefined {
+  return db
+    .prepare('SELECT * FROM pn_sessions WHERE session_id = ?')
+    .get(sessionId) as PnSessionRow | undefined;
+}
+
+export function getActivePnSession(
+  instanceId: string,
+  channelType?: string,
+): PnSessionRow | undefined {
+  if (channelType) {
+    return db
+      .prepare(
+        `SELECT * FROM pn_sessions
+         WHERE instance_id = ? AND channel_type = ? AND status = 'active'
+         ORDER BY last_activity_at DESC LIMIT 1`,
+      )
+      .get(instanceId, channelType) as PnSessionRow | undefined;
+  }
+  return db
+    .prepare(
+      `SELECT * FROM pn_sessions
+       WHERE instance_id = ? AND status = 'active'
+       ORDER BY last_activity_at DESC LIMIT 1`,
+    )
+    .get(instanceId) as PnSessionRow | undefined;
+}
+
+export function getRecentActivePnSession(
+  instanceId: string,
+  sinceMinutes: number = 30,
+): PnSessionRow | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM pn_sessions
+       WHERE instance_id = ? AND status = 'active'
+         AND last_activity_at > datetime('now', ?)
+       ORDER BY last_activity_at DESC LIMIT 1`,
+    )
+    .get(instanceId, `-${sinceMinutes} minutes`) as PnSessionRow | undefined;
+}
+
+export function updatePnSession(
+  sessionId: string,
+  updates: Partial<
+    Pick<PnSessionRow, 'status' | 'topic' | 'summary' | 'message_count' | 'token_count' | 'metadata'>
+  >,
+): void {
+  const fields: string[] = ["last_activity_at = datetime('now')"];
+  const values: unknown[] = [];
+
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if (updates.topic !== undefined) {
+    fields.push('topic = ?');
+    values.push(updates.topic);
+  }
+  if (updates.summary !== undefined) {
+    fields.push('summary = ?');
+    values.push(updates.summary);
+  }
+  if (updates.message_count !== undefined) {
+    fields.push('message_count = ?');
+    values.push(updates.message_count);
+  }
+  if (updates.token_count !== undefined) {
+    fields.push('token_count = ?');
+    values.push(updates.token_count);
+  }
+  if (updates.metadata !== undefined) {
+    fields.push('metadata = ?');
+    values.push(updates.metadata);
+  }
+
+  values.push(sessionId);
+  db.prepare(`UPDATE pn_sessions SET ${fields.join(', ')} WHERE session_id = ?`).run(
+    ...values,
+  );
+}
+
+export function expireOldPnSessions(minutesIdle: number = 30): number {
+  const op = minutesIdle <= 0 ? '<=' : '<';
+  const result = db.prepare(
+    `UPDATE pn_sessions
+     SET status = 'expired'
+     WHERE status = 'active'
+       AND last_activity_at ${op} datetime('now', ?)`,
+  ).run(`-${minutesIdle} minutes`);
+  return result.changes;
+}
+
+export function listRecentPnSessions(
+  instanceId: string,
+  limit: number = 5,
+): PnSessionRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM pn_sessions
+       WHERE instance_id = ?
+       ORDER BY last_activity_at DESC, started_at DESC, ROWID DESC
+       LIMIT ?`,
+    )
+    .all(instanceId, limit) as PnSessionRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Session Messages
+// ---------------------------------------------------------------------------
+
+export function insertSessionMessage(params: {
+  session_id: string;
+  role: string;
+  content: string;
+  channel_type?: string | null;
+  token_estimate?: number;
+}): SessionMessageRow {
+  const message_id = randomUUID();
+  const tokenEstimate = params.token_estimate ?? Math.ceil(params.content.length / 4);
+  db.prepare(
+    `INSERT INTO session_messages (message_id, session_id, role, content, channel_type, token_estimate)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    message_id,
+    params.session_id,
+    params.role,
+    params.content,
+    params.channel_type ?? null,
+    tokenEstimate,
+  );
+  return getSessionMessage(message_id)!;
+}
+
+export function getSessionMessage(messageId: string): SessionMessageRow | undefined {
+  return db
+    .prepare('SELECT * FROM session_messages WHERE message_id = ?')
+    .get(messageId) as SessionMessageRow | undefined;
+}
+
+export function getSessionMessages(
+  sessionId: string,
+  opts?: { includeCompacted?: boolean; limit?: number },
+): SessionMessageRow[] {
+  const conditions = ['session_id = ?'];
+  const values: unknown[] = [sessionId];
+
+  if (!opts?.includeCompacted) {
+    conditions.push('is_compacted = 0');
+  }
+
+  const where = conditions.join(' AND ');
+  const limit = opts?.limit ? `LIMIT ${opts.limit}` : '';
+
+  return db
+    .prepare(
+      `SELECT * FROM session_messages WHERE ${where} ORDER BY timestamp ASC ${limit}`,
+    )
+    .all(...values) as SessionMessageRow[];
+}
+
+export function getSessionMessageCount(sessionId: string): number {
+  const row = db
+    .prepare('SELECT COUNT(*) as cnt FROM session_messages WHERE session_id = ?')
+    .get(sessionId) as { cnt: number };
+  return row.cnt;
+}
+
+export function getSessionTokenTotal(sessionId: string): number {
+  const row = db
+    .prepare(
+      'SELECT COALESCE(SUM(token_estimate), 0) as total FROM session_messages WHERE session_id = ? AND is_compacted = 0',
+    )
+    .get(sessionId) as { total: number };
+  return row.total;
+}
+
+export function markMessagesCompacted(sessionId: string, beforeTimestamp: string): number {
+  const result = db.prepare(
+    `UPDATE session_messages
+     SET is_compacted = 1
+     WHERE session_id = ? AND timestamp < ? AND is_compacted = 0`,
+  ).run(sessionId, beforeTimestamp);
+  return result.changes;
+}
+
+/**
+ * Mark specific messages as compacted by their IDs.
+ */
+export function markMessagesByIdsCompacted(messageIds: string[]): number {
+  if (messageIds.length === 0) return 0;
+  const placeholders = messageIds.map(() => '?').join(', ');
+  const result = db.prepare(
+    `UPDATE session_messages
+     SET is_compacted = 1
+     WHERE message_id IN (${placeholders}) AND is_compacted = 0`,
+  ).run(...messageIds);
+  return result.changes;
+}
+
+// ---------------------------------------------------------------------------
+// GDPR Requests
+// ---------------------------------------------------------------------------
+
+export function createGdprRequest(params: {
+  instance_id: string;
+  org_id: string;
+  request_type: string;
+  requested_by: string;
+  data_scope?: string;
+  metadata?: Record<string, unknown>;
+}): GdprRequestRow {
+  const request_id = randomUUID();
+  db.prepare(
+    `INSERT INTO gdpr_requests
+       (request_id, instance_id, org_id, request_type, requested_by, data_scope, metadata)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    request_id,
+    params.instance_id,
+    params.org_id,
+    params.request_type,
+    params.requested_by,
+    params.data_scope ?? 'all',
+    params.metadata ? JSON.stringify(params.metadata) : null,
+  );
+  return getGdprRequest(request_id)!;
+}
+
+export function getGdprRequest(requestId: string): GdprRequestRow | undefined {
+  return db
+    .prepare('SELECT * FROM gdpr_requests WHERE request_id = ?')
+    .get(requestId) as GdprRequestRow | undefined;
+}
+
+export function listGdprRequestsByInstance(instanceId: string): GdprRequestRow[] {
+  return db
+    .prepare('SELECT * FROM gdpr_requests WHERE instance_id = ? ORDER BY requested_at DESC')
+    .all(instanceId) as GdprRequestRow[];
+}
+
+export function listGdprRequestsByOrg(orgId: string): GdprRequestRow[] {
+  return db
+    .prepare('SELECT * FROM gdpr_requests WHERE org_id = ? ORDER BY requested_at DESC')
+    .all(orgId) as GdprRequestRow[];
+}
+
+export function listGdprRequestsByStatus(status: string): GdprRequestRow[] {
+  return db
+    .prepare('SELECT * FROM gdpr_requests WHERE status = ? ORDER BY requested_at DESC')
+    .all(status) as GdprRequestRow[];
+}
+
+export function updateGdprRequestStatus(
+  requestId: string,
+  status: string,
+  extra?: { processor_notes?: string; export_path?: string; error_message?: string },
+): void {
+  const fields: string[] = ['status = ?'];
+  const values: unknown[] = [status];
+
+  if (status === 'processing') {
+    fields.push("processed_at = datetime('now')");
+  }
+  if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+    fields.push("completed_at = datetime('now')");
+  }
+  if (extra?.processor_notes !== undefined) {
+    fields.push('processor_notes = ?');
+    values.push(extra.processor_notes);
+  }
+  if (extra?.export_path !== undefined) {
+    fields.push('export_path = ?');
+    values.push(extra.export_path);
+  }
+  if (extra?.error_message !== undefined) {
+    fields.push('error_message = ?');
+    values.push(extra.error_message);
+  }
+
+  values.push(requestId);
+  db.prepare(`UPDATE gdpr_requests SET ${fields.join(', ')} WHERE request_id = ?`).run(
+    ...values,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Retention Policies
+// ---------------------------------------------------------------------------
+
+export function upsertRetentionPolicy(params: {
+  org_id: string;
+  data_category: string;
+  retention_days: number;
+  auto_delete?: number;
+}): RetentionPolicyRow {
+  const policy_id = randomUUID();
+  db.prepare(
+    `INSERT INTO retention_policies (policy_id, org_id, data_category, retention_days, auto_delete)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(org_id, data_category) DO UPDATE SET
+       retention_days = excluded.retention_days,
+       auto_delete = excluded.auto_delete,
+       updated_at = datetime('now')`,
+  ).run(
+    policy_id,
+    params.org_id,
+    params.data_category,
+    params.retention_days,
+    params.auto_delete ?? 1,
+  );
+  return db
+    .prepare('SELECT * FROM retention_policies WHERE org_id = ? AND data_category = ?')
+    .get(params.org_id, params.data_category) as RetentionPolicyRow;
+}
+
+export function getRetentionPolicy(
+  orgId: string,
+  dataCategory: string,
+): RetentionPolicyRow | undefined {
+  return db
+    .prepare('SELECT * FROM retention_policies WHERE org_id = ? AND data_category = ?')
+    .get(orgId, dataCategory) as RetentionPolicyRow | undefined;
+}
+
+export function listRetentionPolicies(orgId: string): RetentionPolicyRow[] {
+  return db
+    .prepare('SELECT * FROM retention_policies WHERE org_id = ? ORDER BY data_category')
+    .all(orgId) as RetentionPolicyRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Consent Records
+// ---------------------------------------------------------------------------
+
+export function upsertConsent(params: {
+  instance_id: string;
+  consent_type: string;
+  granted: boolean;
+  ip_address?: string;
+  user_agent?: string;
+  version?: string;
+}): ConsentRecordRow {
+  const consent_id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO consent_records
+       (consent_id, instance_id, consent_type, granted, granted_at, withdrawn_at, ip_address, user_agent, version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(instance_id, consent_type) DO UPDATE SET
+       granted = excluded.granted,
+       granted_at = CASE WHEN excluded.granted = 1 THEN excluded.granted_at ELSE granted_at END,
+       withdrawn_at = CASE WHEN excluded.granted = 0 THEN excluded.withdrawn_at ELSE withdrawn_at END,
+       ip_address = excluded.ip_address,
+       user_agent = excluded.user_agent,
+       version = excluded.version`,
+  ).run(
+    consent_id,
+    params.instance_id,
+    params.consent_type,
+    params.granted ? 1 : 0,
+    params.granted ? now : null,
+    params.granted ? null : now,
+    params.ip_address ?? null,
+    params.user_agent ?? null,
+    params.version ?? '1.0',
+  );
+  return db
+    .prepare('SELECT * FROM consent_records WHERE instance_id = ? AND consent_type = ?')
+    .get(params.instance_id, params.consent_type) as ConsentRecordRow;
+}
+
+export function getConsent(
+  instanceId: string,
+  consentType: string,
+): ConsentRecordRow | undefined {
+  return db
+    .prepare('SELECT * FROM consent_records WHERE instance_id = ? AND consent_type = ?')
+    .get(instanceId, consentType) as ConsentRecordRow | undefined;
+}
+
+export function listConsents(instanceId: string): ConsentRecordRow[] {
+  return db
+    .prepare('SELECT * FROM consent_records WHERE instance_id = ? ORDER BY consent_type')
+    .all(instanceId) as ConsentRecordRow[];
+}
+
+// ---------------------------------------------------------------------------
+// GDPR Data Access Helpers (for export/delete operations)
+// ---------------------------------------------------------------------------
+
+export function getUserPatternLogs(userIdHash: string, orgId: string): PatternLogRow[] {
+  return db
+    .prepare('SELECT * FROM pattern_logs WHERE user_id_hash = ? AND org_id = ? ORDER BY timestamp DESC')
+    .all(userIdHash, orgId) as PatternLogRow[];
+}
+
+export function anonymizePatternLogs(userIdHash: string, orgId: string): number {
+  const result = db
+    .prepare(
+      `UPDATE pattern_logs SET user_id_hash = 'ANONYMIZED_' || pattern_id
+       WHERE user_id_hash = ? AND org_id = ?`,
+    )
+    .run(userIdHash, orgId);
+  return result.changes;
+}
+
+export function deleteChannelBindingsByInstance(instanceId: string): number {
+  const result = db
+    .prepare('DELETE FROM channel_bindings WHERE instance_id = ?')
+    .run(instanceId);
+  return result.changes;
+}
+
+export function deleteUserSkillsByUserId(userId: string): number {
+  const result = db
+    .prepare('DELETE FROM user_skills WHERE user_id = ?')
+    .run(userId);
+  return result.changes;
+}
+
+export function softDeleteUserInstance(instanceId: string): void {
+  db.prepare(
+    `UPDATE user_instances
+     SET status = 'deleted', user_id = '[REDACTED]', role_category = '[REDACTED]',
+         encryption_key_ref = '[REDACTED]', folder = '[REDACTED]', trigger_pattern = ''
+     WHERE instance_id = ?`,
+  ).run(instanceId);
+}
+
+export function updateUserInstanceFields(
+  instanceId: string,
+  updates: Partial<Pick<UserInstanceRow, 'role_category' | 'access_mode' | 'folder' | 'trigger_pattern'>>,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.role_category !== undefined) {
+    fields.push('role_category = ?');
+    values.push(updates.role_category);
+  }
+  if (updates.access_mode !== undefined) {
+    fields.push('access_mode = ?');
+    values.push(updates.access_mode);
+  }
+  if (updates.folder !== undefined) {
+    fields.push('folder = ?');
+    values.push(updates.folder);
+  }
+  if (updates.trigger_pattern !== undefined) {
+    fields.push('trigger_pattern = ?');
+    values.push(updates.trigger_pattern);
+  }
+
+  if (fields.length === 0) return;
+
+  values.push(instanceId);
+  db.prepare(`UPDATE user_instances SET ${fields.join(', ')} WHERE instance_id = ?`).run(
+    ...values,
+  );
+}
+
+export function deleteUserMemoriesByInstance(instanceId: string): number {
+  const result = db
+    .prepare('DELETE FROM user_memories WHERE instance_id = ?')
+    .run(instanceId);
+  return result.changes;
+}
+
+export function deleteSessionsByInstance(instanceId: string): number {
+  // Delete session messages first (FK constraint)
+  db.prepare(
+    `DELETE FROM session_messages WHERE session_id IN
+     (SELECT session_id FROM pn_sessions WHERE instance_id = ?)`,
+  ).run(instanceId);
+  const result = db
+    .prepare('DELETE FROM pn_sessions WHERE instance_id = ?')
+    .run(instanceId);
+  return result.changes;
+}
+
+export function deleteConsentsByInstance(instanceId: string): number {
+  const result = db
+    .prepare('DELETE FROM consent_records WHERE instance_id = ?')
+    .run(instanceId);
+  return result.changes;
+}
+
+export function getUserMemoriesByInstance(instanceId: string): Array<{
+  memory_id: string;
+  instance_id: string;
+  memory_type: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}> {
+  return db
+    .prepare(
+      `SELECT memory_id, instance_id, memory_type, content, created_at, updated_at
+       FROM user_memories WHERE instance_id = ? AND is_deleted = 0 ORDER BY updated_at DESC`,
+    )
+    .all(instanceId) as Array<{
+    memory_id: string;
+    instance_id: string;
+    memory_type: string;
+    content: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+}
+
+export function getSessionsByInstance(instanceId: string): Array<{
+  session_id: string;
+  instance_id: string;
+  channel_type: string;
+  started_at: string;
+  last_activity_at: string;
+  status: string;
+  topic: string | null;
+  message_count: number;
+}> {
+  return db
+    .prepare(
+      `SELECT session_id, instance_id, channel_type, started_at, last_activity_at,
+              status, topic, message_count
+       FROM pn_sessions WHERE instance_id = ? ORDER BY last_activity_at DESC`,
+    )
+    .all(instanceId) as Array<{
+    session_id: string;
+    instance_id: string;
+    channel_type: string;
+    started_at: string;
+    last_activity_at: string;
+    status: string;
+    topic: string | null;
+    message_count: number;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
+// Retention enforcement helpers
+// ---------------------------------------------------------------------------
+
+export function deleteOldPatternLogs(orgId: string, beforeDate: string): number {
+  const result = db
+    .prepare('DELETE FROM pattern_logs WHERE org_id = ? AND timestamp < ?')
+    .run(orgId, beforeDate);
+  return result.changes;
+}
+
+export function deleteOldAuditLogs(orgId: string, beforeDate: string): number {
+  const result = db
+    .prepare('DELETE FROM audit_logs WHERE org_id = ? AND timestamp < ?')
+    .run(orgId, beforeDate);
+  return result.changes;
+}
+
+export function deleteOldUserMemories(orgId: string, beforeDate: string): number {
+  const result = db
+    .prepare(
+      `DELETE FROM user_memories WHERE instance_id IN
+       (SELECT instance_id FROM user_instances WHERE org_id = ?)
+       AND updated_at < ?`,
+    )
+    .run(orgId, beforeDate);
+  return result.changes;
+}
+
+export function deleteOldSessions(orgId: string, beforeDate: string): number {
+  // Delete session messages first (FK constraint)
+  db.prepare(
+    `DELETE FROM session_messages WHERE session_id IN
+     (SELECT session_id FROM pn_sessions WHERE instance_id IN
+       (SELECT instance_id FROM user_instances WHERE org_id = ?)
+       AND last_activity_at < ?)`,
+  ).run(orgId, beforeDate);
+  const result = db
+    .prepare(
+      `DELETE FROM pn_sessions WHERE instance_id IN
+       (SELECT instance_id FROM user_instances WHERE org_id = ?)
+       AND last_activity_at < ?`,
+    )
+    .run(orgId, beforeDate);
+  return result.changes;
+}
+
+export function deleteOldChannelBindings(orgId: string, beforeDate: string): number {
+  const result = db
+    .prepare('DELETE FROM channel_bindings WHERE org_id = ? AND created_at < ?')
+    .run(orgId, beforeDate);
+  return result.changes;
+}
+
+export function countDataByCategory(
+  orgId: string,
+  category: string,
+): { total: number; oldest: string | null } {
+  let row: { total: number; oldest: string | null };
+  switch (category) {
+    case 'personal_memory':
+      row = db
+        .prepare(
+          `SELECT COUNT(*) as total, MIN(updated_at) as oldest FROM user_memories
+           WHERE instance_id IN (SELECT instance_id FROM user_instances WHERE org_id = ?)
+           AND is_deleted = 0`,
+        )
+        .get(orgId) as { total: number; oldest: string | null };
+      break;
+    case 'session_history':
+      row = db
+        .prepare(
+          `SELECT COUNT(*) as total, MIN(last_activity_at) as oldest FROM pn_sessions
+           WHERE instance_id IN (SELECT instance_id FROM user_instances WHERE org_id = ?)`,
+        )
+        .get(orgId) as { total: number; oldest: string | null };
+      break;
+    case 'pattern_logs':
+      row = db
+        .prepare(
+          'SELECT COUNT(*) as total, MIN(timestamp) as oldest FROM pattern_logs WHERE org_id = ?',
+        )
+        .get(orgId) as { total: number; oldest: string | null };
+      break;
+    case 'audit_logs':
+      row = db
+        .prepare(
+          'SELECT COUNT(*) as total, MIN(timestamp) as oldest FROM audit_logs WHERE org_id = ?',
+        )
+        .get(orgId) as { total: number; oldest: string | null };
+      break;
+    case 'channel_bindings':
+      row = db
+        .prepare(
+          'SELECT COUNT(*) as total, MIN(created_at) as oldest FROM channel_bindings WHERE org_id = ?',
+        )
+        .get(orgId) as { total: number; oldest: string | null };
+      break;
+    default:
+      row = { total: 0, oldest: null };
+  }
+  return row;
 }

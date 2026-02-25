@@ -20,12 +20,25 @@ import { logger } from '../logger.js';
 import type { Channel, NewMessage } from '../types.js';
 
 import { assembleOrgContext, buildContextPrompt, type AssembledContext } from './context-engine.js';
+import { hasConsent, ConsentRequiredError } from './consent-manager.js';
+import {
+  extractMemories,
+  storeMemory,
+  buildMemoryPrompt,
+} from './memory-store.js';
 import {
   buildPatternRecord,
   emitPattern,
   getCurrentPeriod,
   CATEGORY_L1,
 } from './pattern-collector.js';
+import {
+  getOrCreateSession,
+  addMessage,
+  buildSessionPrompt,
+  needsCompaction,
+  compactSession,
+} from './session-manager.js';
 import { parseJid, resolveUserInstance } from './tenant-resolver.js';
 import { buildSkillPrompt, type ParsedSkill } from './skill-runtime.js';
 import { findSkillBySlashCommand } from './skill-registry.js';
@@ -134,12 +147,14 @@ export function classifyInteraction(
 
 /**
  * Build the full system prompt for the agent.
- * Combines organizational context with optional active skill instructions.
+ * Combines organizational context, personal memory, session history,
+ * and optional active skill instructions.
  */
 export function buildSystemPrompt(
   instance: UserInstance,
   context: AssembledContext,
   activeSkill?: ParsedSkill,
+  opts?: { memoryPrompt?: string; sessionPrompt?: string },
 ): string {
   const parts: string[] = [];
 
@@ -158,6 +173,16 @@ export function buildSystemPrompt(
   const contextPrompt = buildContextPrompt(context);
   if (contextPrompt.trim()) {
     parts.push(contextPrompt);
+  }
+
+  // Personal memory
+  if (opts?.memoryPrompt && opts.memoryPrompt.trim()) {
+    parts.push(opts.memoryPrompt);
+  }
+
+  // Session history
+  if (opts?.sessionPrompt && opts.sessionPrompt.trim()) {
+    parts.push(opts.sessionPrompt);
   }
 
   // Active skill instructions
@@ -290,7 +315,65 @@ export async function handleInboundMessage(
     };
   }
 
-  // Step 4: Assemble organizational context
+  // Step 3.5: Check consent for data processing
+  if (!hasConsent(instance.instance_id, 'data_processing')) {
+    logger.info(
+      { instanceId: instance.instance_id },
+      'User has not granted data_processing consent',
+    );
+    try {
+      await deps.sendMessage(
+        jid,
+        'Before I can assist you, I need your consent to process your messages. ' +
+        'Please grant data processing consent through your Play New settings or contact your administrator.',
+      );
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send consent request message');
+    }
+    return {
+      success: false,
+      error: 'Consent required: data_processing',
+      instanceId: instance.instance_id,
+    };
+  }
+
+  // Step 4: Get or create a session for this user
+  let sessionId: string | undefined;
+  let sessionPromptText = '';
+  try {
+    const session = getOrCreateSession(
+      instance.instance_id,
+      parsed.channel,
+      parsed.user_ref,
+    );
+    sessionId = session.session_id;
+
+    // Add the user message to the session
+    addMessage(session.session_id, 'user', message.content, {
+      channelType: parsed.channel,
+    });
+
+    // Build session prompt (allocate ~2000 tokens for session history)
+    sessionPromptText = buildSessionPrompt(session.session_id, 2000);
+  } catch (err) {
+    logger.warn(
+      { instanceId: instance.instance_id, err },
+      'Session management failed — proceeding without session context',
+    );
+  }
+
+  // Step 5: Recall relevant memories
+  let memoryPromptText = '';
+  try {
+    memoryPromptText = buildMemoryPrompt(instance.instance_id, message.content);
+  } catch (err) {
+    logger.warn(
+      { instanceId: instance.instance_id, err },
+      'Memory recall failed — proceeding without memory context',
+    );
+  }
+
+  // Step 6: Assemble organizational context
   let context: AssembledContext;
   try {
     context = await assembleOrgContext(instance.org_id, message.content);
@@ -302,7 +385,7 @@ export async function handleInboundMessage(
     context = { coreContext: '', relevantContext: '', estimatedTokens: 0 };
   }
 
-  // Step 5: Check for skill invocation (slash command)
+  // Step 7: Check for skill invocation (slash command)
   let activeSkill: ParsedSkill | null = null;
   const skillMatch = findSkillBySlashCommand(message.content);
   if (skillMatch) {
@@ -317,14 +400,18 @@ export async function handleInboundMessage(
     );
   }
 
-  // Step 6: Build the system prompt
+  // Step 8: Build the system prompt (with memory + session context)
   const systemPrompt = buildSystemPrompt(
     instance,
     context,
     activeSkill ?? undefined,
+    {
+      memoryPrompt: memoryPromptText,
+      sessionPrompt: sessionPromptText,
+    },
   );
 
-  // Step 7: Execute the agent
+  // Step 9: Execute the agent
   let agentResponse: string;
   try {
     agentResponse = await deps.executeAgent(
@@ -356,7 +443,7 @@ export async function handleInboundMessage(
 
   const durationMs = Date.now() - startTime;
 
-  // Step 8: Send the response back through the channel
+  // Step 10: Send the response back through the channel
   try {
     await deps.sendMessage(jid, agentResponse);
   } catch (err) {
@@ -372,20 +459,64 @@ export async function handleInboundMessage(
     };
   }
 
-  // Step 9: Classify and log the interaction pattern (fire-and-forget)
+  // Step 11: Post-response processing (fire-and-forget)
+  // 11a: Add assistant response to session
+  if (sessionId) {
+    try {
+      addMessage(sessionId, 'assistant', agentResponse, {
+        channelType: parsed.channel,
+      });
+
+      // Check if session needs compaction
+      if (needsCompaction(sessionId)) {
+        compactSession(sessionId);
+      }
+    } catch (err) {
+      logger.warn(
+        { sessionId, err },
+        'Failed to record assistant response in session (non-fatal)',
+      );
+    }
+  }
+
+  // 11b: Extract and store memories from the interaction
+  try {
+    const memories = extractMemories(message.content, agentResponse);
+    for (const mem of memories) {
+      storeMemory(instance.instance_id, mem.type, mem.content, {
+        sourceChannel: parsed.channel,
+        confidence: mem.confidence,
+      });
+    }
+  } catch (err) {
+    logger.warn(
+      { instanceId: instance.instance_id, err },
+      'Memory extraction failed (non-fatal)',
+    );
+  }
+
+  // 11c: Classify and log the interaction pattern
   const category = classifyInteraction(message.content, agentResponse);
-  logInteraction({
-    instance,
-    category,
-    tools: [],
-    durationMs,
-  }).catch(() => {
-    // Already logged inside logInteraction — no further action needed
-  });
+  if (hasConsent(instance.instance_id, 'pattern_collection')) {
+    logInteraction({
+      instance,
+      category,
+      tools: [],
+      durationMs,
+    }).catch(() => {
+      // Already logged inside logInteraction — no further action needed
+    });
+  } else {
+    logger.debug(
+      { instanceId: instance.instance_id },
+      'Skipping pattern logging — user has not granted pattern_collection consent',
+    );
+  }
 
   logger.info(
     {
       instanceId: instance.instance_id,
+      sessionId,
       durationMs,
       category,
       skillId: activeSkill?.metadata.id,

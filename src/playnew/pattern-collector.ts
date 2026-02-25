@@ -15,6 +15,7 @@ import type { PatternRecord, PatternType, MetricType } from './types.js';
 import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { insertPattern as insertPatternLog } from './db.js';
+import { logger } from '../logger.js';
 
 /**
  * Interaction categories from the Work Category Taxonomy.
