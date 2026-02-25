@@ -33,3 +33,7 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Play New local data
+*.keys.json
+.env.local

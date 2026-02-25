@@ -1,60 +1,79 @@
-# NanoClaw
+# Play New (pn-agent)
 
-Personal Claude assistant. See [README.md](README.md) for philosophy and setup. See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for architecture decisions.
+Continuous strategic intelligence platform. Personal AI assistants for every user + anonymized organizational intelligence. Built on [nanoclaw](https://github.com/qwibitai/nanoclaw).
 
-## Quick Context
+## Architecture
 
-Single Node.js process that connects to WhatsApp, routes messages to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory.
+**Dual-layer system:**
+- **Layer 1 — Personal Assistant:** Per-user isolated AI instances delivered via Slack/Teams/Email. Each has personal memory, org context injection, and skills.
+- **Layer 2 — Organizational Intelligence:** Anonymized aggregation of usage patterns into strategic insights (Automate/Differentiate/Innovate streams).
+
+**Nanoclaw foundation:** This repo is a fork of nanoclaw. The key mapping: nanoclaw's "group" = Play New's "user instance." We inherit container isolation, Channel interface, task scheduler, skills engine, and Claude Agent SDK integration.
 
 ## Key Files
 
+### Nanoclaw Core (inherited)
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
-| `src/ipc.ts` | IPC watcher and task processing |
+| `src/types.ts` | Core interfaces: Channel, RegisteredGroup, NewMessage, ScheduledTask |
+| `src/channels/whatsapp.ts` | WhatsApp channel (nanoclaw default — Play New uses Slack/Teams) |
 | `src/router.ts` | Message formatting and outbound routing |
-| `src/config.ts` | Trigger pattern, paths, intervals |
+| `src/config.ts` | Configuration: trigger patterns, paths, intervals |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
-| `src/task-scheduler.ts` | Runs scheduled tasks |
+| `src/task-scheduler.ts` | Runs scheduled tasks (cron/interval/once) |
 | `src/db.ts` | SQLite operations |
-| `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
-| `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
+| `src/ipc.ts` | IPC watcher and task processing |
+| `container/agent-runner/src/index.ts` | Agent entry point inside containers (Claude SDK integration) |
 
-## Skills
+### Play New Extensions
+| File | Purpose |
+|------|---------|
+| `src/channels/slack.ts` | Slack channel (primary for Phase 0) |
+| `src/channels/teams.ts` | Teams channel |
+| `src/channels/email-bridge.ts` | Email forward-mode bridge |
+| `src/playnew/types.ts` | Play New types: UserInstance, Organization, Team, Skill |
+| `src/playnew/tenant-resolver.ts` | Multi-tenant routing: channel ID → org + user instance |
+| `src/playnew/pattern-collector.ts` | Categorical pattern logging (never content) |
+| `src/playnew/context-engine.ts` | Org context RAG injection |
+| `src/playnew/skill-runtime.ts` | User skill (SKILL.md) execution engine |
+| `skills/` | User-facing skill library (SKILL.md format) |
+| `groups/{name}/CLAUDE.md` | Per-group/user memory (isolated) |
 
-| Skill | When to Use |
-|-------|-------------|
-| `/setup` | First-time installation, authentication, service configuration |
-| `/customize` | Adding channels, integrations, changing behavior |
-| `/debug` | Container issues, logs, troubleshooting |
-| `/update` | Pull upstream NanoClaw changes, merge with customizations, run migrations |
-| `/qodo-pr-resolver` | Fetch and fix Qodo PR review issues interactively or in batch |
-| `/get-qodo-rules` | Load org- and repo-level coding rules from Qodo before code tasks |
+## Documentation
+
+| Category | Location | Purpose |
+|----------|----------|---------|
+| PRD | `PRD.md` | What we build (business requirements) |
+| Architecture | `docs/architecture/` | How the system is designed |
+| Specs | `docs/specs/` | Detailed technical specifications |
+| Guides | `docs/guides/` | How-to documents |
+| Decisions | `docs/decisions/` | Architecture Decision Records (ADRs) |
+| Nanoclaw Reference | `docs/nanoclaw-reference/` | Original nanoclaw documentation |
 
 ## Development
-
-Run commands directly—don't tell the user to run them.
 
 ```bash
 npm run dev          # Run with hot reload
 npm run build        # Compile TypeScript
+npm test             # Run tests (vitest)
+npm run typecheck    # TypeScript type checking
 ./container/build.sh # Rebuild agent container
 ```
 
-Service management:
-```bash
-# macOS (launchd)
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
+## Key Conventions
 
-# Linux (systemd)
-systemctl --user start nanoclaw
-systemctl --user stop nanoclaw
-systemctl --user restart nanoclaw
+- **Privacy is architecture, not a feature.** Personal data encrypted with user-scoped keys. Anonymization boundary enforced at DB level (PostgreSQL views with min 5-user threshold).
+- **Skills over features.** New capabilities are SKILL.md files, not code changes.
+- **Two types of skills:** Platform skills (`.claude/skills/`, nanoclaw-style code modification) vs User skills (`skills/`, LLM instruction documents for end users).
+- **Wrap, don't build.** Use Claude/GPT as inference backbone. Build the context, skill, and intelligence layers.
+- **Forward mode first (Phase 0).** Users push content to their assistant. No passive observation yet.
+
+## Upstream Sync
+
+```bash
+git fetch upstream
+git merge upstream/main  # Merge nanoclaw updates
 ```
 
-## Container Build Cache
-
-The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+Nanoclaw core files are in `src/`. Play New extensions are in `src/playnew/` and `src/channels/`. Conflicts should be rare since we extend rather than modify nanoclaw core.
