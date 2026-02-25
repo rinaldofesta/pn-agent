@@ -14,6 +14,7 @@
 import type { PatternRecord, PatternType, MetricType } from './types.js';
 import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
+import { insertPattern as insertPatternLog } from './db.js';
 
 /**
  * Interaction categories from the Work Category Taxonomy.
@@ -132,10 +133,22 @@ export function buildPatternRecord(params: {
 }
 
 /**
- * Placeholder: persist a pattern record to the database.
- * Will write to the pattern_logs table.
+ * Persist a pattern record to the database.
+ * Writes to the pattern_logs table via the Play New db module.
  */
-export async function emitPattern(_record: PatternRecord): Promise<void> {
-  // TODO: Insert into pattern_logs table
-  // See docs/specs/data/database-schema.md for schema
+export async function emitPattern(record: PatternRecord): Promise<void> {
+  insertPatternLog({
+    user_id_hash: record.user_id,
+    org_id: record.org_id,
+    team_id: record.team_id,
+    pattern_type: record.pattern_type,
+    category_l1: record.category_L1,
+    category_l2: record.category_L2,
+    category_l3: record.category_L3,
+    metric_type: record.metric_type,
+    metric_value: record.metric_value,
+    tools_involved: record.tools_involved,
+    timestamp: record.timestamp,
+    period: record.period,
+  });
 }

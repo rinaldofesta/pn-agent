@@ -9,7 +9,9 @@
  * extended for multi-tenant, per-user isolation.
  */
 
-import type { UserInstance } from './types.js';
+import { logger } from '../logger.js';
+import { resolveBinding, getUserInstance } from './db.js';
+import type { UserInstance, AccessMode, InstanceStatus } from './types.js';
 
 /**
  * Channel binding: maps a channel-specific identity to a Play New user instance.
@@ -46,15 +48,52 @@ export function parseJid(jid: string): {
 }
 
 /**
- * Placeholder: resolve a channel binding to a UserInstance.
- * Will be backed by PostgreSQL + Redis cache in production.
+ * Resolve a channel binding to a UserInstance.
+ * Looks up the channel_bindings table, then fetches the full UserInstance.
  */
 export async function resolveUserInstance(
-  _channelType: string,
-  _channelOrgId: string,
-  _channelUserId: string,
+  channelType: string,
+  channelOrgId: string,
+  channelUserId: string,
 ): Promise<UserInstance | null> {
-  // TODO: Implement with database lookup + Redis cache
-  // See docs/architecture/02-multi-tenant-architecture.md for routing design
-  return null;
+  try {
+    const binding = resolveBinding(channelType, channelOrgId, channelUserId);
+    if (!binding) {
+      logger.debug(
+        { channelType, channelOrgId, channelUserId },
+        'No channel binding found',
+      );
+      return null;
+    }
+
+    const row = getUserInstance(binding.instance_id);
+    if (!row) {
+      logger.warn(
+        { instanceId: binding.instance_id, channelType, channelUserId },
+        'Channel binding references missing user instance',
+      );
+      return null;
+    }
+
+    // Map DB row to UserInstance type
+    return {
+      instance_id: row.instance_id,
+      user_id: row.user_id,
+      org_id: row.org_id,
+      team_id: row.team_id,
+      role_category: row.role_category,
+      access_mode: row.access_mode as AccessMode,
+      status: row.status as InstanceStatus,
+      encryption_key_ref: row.encryption_key_ref,
+      created_at: row.created_at,
+      folder: row.folder,
+      trigger: row.trigger_pattern,
+    };
+  } catch (err) {
+    logger.error(
+      { channelType, channelOrgId, channelUserId, err },
+      'Error resolving user instance',
+    );
+    return null;
+  }
 }

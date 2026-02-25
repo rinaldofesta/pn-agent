@@ -12,6 +12,11 @@
  * See: PRD Section 6.3.5
  */
 
+import fs from 'fs';
+import path from 'path';
+
+import { GROUPS_DIR } from '../config.js';
+import { logger } from '../logger.js';
 import type { OrgContextDocument } from './types.js';
 
 /**
@@ -43,17 +48,69 @@ export async function assembleOrgContext(
   orgId: string,
   _userQuery?: string,
 ): Promise<AssembledContext> {
-  // Phase 0: Load static context files
-  // These are stored in groups/{org_id}/context/ as markdown files
-  // created by Play New advisors during onboarding
+  // Phase 0: Load static context files from groups/{orgId}/context/
+  // These are markdown files created by Play New advisors during onboarding
 
-  // TODO: Implement filesystem loading + future pgvector RAG
-  // See docs/specs/memory/org-context-engine-spec.md for full design
+  const contextDir = path.join(GROUPS_DIR, orgId, 'context');
+
+  const coreParts: string[] = [];
+  const relevantParts: string[] = [];
+  let totalChars = 0;
+
+  // Core context files that are always injected (strategy, team_structure)
+  const coreFiles = ['strategy.md', 'team_structure.md', 'team-structure.md'];
+  // Additional context files injected as relevant context
+  const supplementalFiles = ['competitive.md', 'industry.md', 'framework.md', 'frameworks.md'];
+
+  try {
+    if (!fs.existsSync(contextDir)) {
+      logger.debug({ orgId, contextDir }, 'No context directory found for org');
+      return {
+        coreContext: '',
+        relevantContext: '',
+        estimatedTokens: 0,
+      };
+    }
+
+    const files = fs.readdirSync(contextDir).filter((f) => f.endsWith('.md'));
+
+    for (const file of files) {
+      const filePath = path.join(contextDir, file);
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8').trim();
+        if (!content) continue;
+
+        const charCount = content.length;
+        // Rough token estimate: ~4 chars per token
+        if (totalChars + charCount > MAX_CONTEXT_TOKENS * 4) {
+          logger.debug(
+            { orgId, file, totalChars },
+            'Skipping context file — would exceed token budget',
+          );
+          continue;
+        }
+
+        totalChars += charCount;
+
+        if (coreFiles.includes(file)) {
+          coreParts.push(content);
+        } else {
+          relevantParts.push(content);
+        }
+      } catch (err) {
+        logger.warn({ orgId, file, err }, 'Failed to read context file');
+      }
+    }
+  } catch (err) {
+    logger.warn({ orgId, contextDir, err }, 'Failed to read context directory');
+  }
+
+  const estimatedTokens = Math.ceil(totalChars / 4);
 
   return {
-    coreContext: `[Organizational context for ${orgId} — to be loaded from context documents]`,
-    relevantContext: '',
-    estimatedTokens: 0,
+    coreContext: coreParts.join('\n\n'),
+    relevantContext: relevantParts.join('\n\n'),
+    estimatedTokens,
   };
 }
 

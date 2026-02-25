@@ -18,3 +18,26 @@ export type {
   OrgContextDocument,
   AuditLogEntry,
 } from './types.js';
+
+// Message pipeline — main orchestrator
+export {
+  handleInboundMessage,
+  buildSystemPrompt,
+  classifyInteraction,
+  logInteraction,
+} from './message-pipeline.js';
+export type { PipelineDeps, PipelineResult } from './message-pipeline.js';
+
+// Skill registry
+export {
+  loadSkillsFromDisk,
+  getSkillRegistry,
+  findSkillBySlashCommand,
+  findSkillById,
+  reloadSkills,
+} from './skill-registry.js';
+
+// Re-export wired modules
+export { assembleOrgContext, buildContextPrompt } from './context-engine.js';
+export { resolveUserInstance, parseJid } from './tenant-resolver.js';
+export { emitPattern, buildPatternRecord } from './pattern-collector.js';
